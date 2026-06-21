@@ -67,14 +67,31 @@ When a Figma link loads, the worker:
 
 - extracts its file key,
 - looks for another open tab with the same file key,
-- and, if one exists, focuses that tab and asks Figma's own client-side router
-  to navigate to the linked location, then closes the duplicate.
+- and, if one exists, focuses that tab and jumps it to the linked node, then
+  closes the duplicate.
 
-The in-place jump is done through the History API (`pushState` + `popstate`) —
-the same mechanism Figma uses for the browser's back/forward buttons — so the
-already-loaded file simply moves to the right page/node **instead of doing a
-full reload**. If the existing tab isn't ready for an in-app jump, it falls back
-to a normal navigation so the link always lands somewhere.
+### The no-reload jump
+
+The interesting part is moving the existing tab to the right node *without
+reloading it*. Figma's web editor reads the `node-id` only at load time, so
+changing the URL would force a full reload. Instead, the extension uses Figma's
+own **in-page Plugin API** — the `window.figma` object that Figma plugins use,
+which is also reachable from the page's `MAIN` JavaScript world. It:
+
+1. injects a snippet into the existing tab's `MAIN` world,
+2. waits for `window.figma` to be ready (it loads asynchronously after the
+   editor boots, and may live inside the editor's same-origin iframe),
+3. resolves the node with `figma.getNodeByIdAsync(...)`,
+4. switches to its page with `figma.setCurrentPageAsync(...)` if needed, and
+5. moves the viewport with `figma.viewport.scrollAndZoomIntoView([node])` and
+   selects it — exactly what the desktop app does.
+
+No reload, no lost work — the canvas just glides to the node.
+
+> **Note:** the Plugin API jump needs **edit access** to the file (Figma only
+> exposes `window.figma` to editors). On view-only files, or if the editor
+> hasn't finished booting, the extension automatically **falls back to a normal
+> navigation** so the link still lands at the right place.
 
 If no other tab has the file open, the link is left alone — it simply becomes the
 canonical tab for that file. Internal navigation within a single open file is
@@ -85,12 +102,13 @@ never touched.
 | Permission | Why it's needed |
 | --- | --- |
 | `tabs` | Read tab URLs to detect Figma files, switch to the existing tab, and close the duplicate. |
-| `scripting` | Inject a tiny History-API call into the existing Figma tab so it jumps to the linked location without reloading. |
+| `scripting` | Inject the snippet that calls Figma's in-page Plugin API (`window.figma`) to jump the existing tab to the linked node without reloading. |
 | `storage` | Remember whether the feature is enabled. |
 | `host_permissions: *://*.figma.com/*` | Limit all of the above strictly to Figma pages. |
 
-The injected snippet only calls `history.pushState` + dispatches a `popstate`
-event. The extension never reads page contents and never touches non-Figma tabs.
+The injected snippet only locates a node and moves the viewport to it. The
+extension never reads or exfiltrates page contents and never touches non-Figma
+tabs.
 
 ## Settings
 

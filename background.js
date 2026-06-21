@@ -92,9 +92,9 @@ async function consolidate(tabId, url) {
     }
 
     // The existing tab already has this file loaded. Instead of reloading it,
-    // ask Figma's own SPA router to navigate to the linked location — exactly
-    // like clicking a comment/share link from inside the file. Our pushState
-    // will fire onUpdated for this tab, so guard against re-entry.
+    // drive Figma's in-page Plugin API to jump to the linked node — exactly
+    // like the desktop app moving its viewport. navigateInPlace may pushState,
+    // which fires onUpdated for this tab, so guard against re-entry.
     programmaticNav.add(target.id);
     await navigateInPlace(target.id, url);
     setTimeout(() => programmaticNav.delete(target.id), 5000);
@@ -114,52 +114,125 @@ async function consolidate(tabId, url) {
   }
 }
 
-// Navigate an already-loaded Figma tab to a new location without a full page
-// reload, by driving Figma's own client-side router.
+// Jump an already-loaded Figma tab to the linked node WITHOUT a full reload by
+// driving Figma's in-page Plugin API — the same `window.figma` that plugins
+// (and tools like figma-mcp-browser) use. This is what lets us match the
+// desktop app: move the viewport instead of re-loading the document.
 //
-// Two things are essential:
-//   1. world: "MAIN" — the snippet must run in the page's own JS context, not
-//      the extension's isolated world. Figma's router patches/listens on the
-//      page's History API; a pushState from the isolated world hits the
-//      *native* History and is invisible to it (this is exactly why an
-//      isolated-world attempt silently did nothing).
-//   2. pushState + a manually dispatched popstate — pushState alone never
-//      notifies an SPA router, but routers (React Router style, which Figma
-//      uses) re-read window.location on `popstate`, the same event the
-//      back/forward buttons fire. So we replay it.
+// What makes this work:
+//   - world: "MAIN" — `window.figma` lives in the page's own JS context, not
+//     the extension's isolated world, so the snippet must run in MAIN.
+//   - It initialises asynchronously after the editor boots, and may live on
+//     the top window, on a manually-registered instance, or inside the
+//     same-origin editor iframe — so we poll and scan frames for it.
+//   - node-id in the URL is hyphenated (1-23); the Plugin API wants colons
+//     (1:23).
 //
-// pushState can't trigger a reload, so this is safe; if Figma ignored it the
-// URL would still be correct and nothing destroyed. Falls back to a real
-// navigation only when injection itself is rejected (discarded tab, etc.).
+// Returns/handles a {moved} result; if the API isn't reachable (view-only
+// file, editor not ready, etc.) we fall back to a normal navigation so the
+// link still lands at the right place.
 async function navigateInPlace(tabId, url) {
+  let moved = false;
   try {
-    await chrome.scripting.executeScript({
+    const results = await chrome.scripting.executeScript({
       target: { tabId },
       world: "MAIN",
       args: [url],
-      func: (href) => {
+      func: async (href) => {
+        const findFigma = () => {
+          if (window.figma) return window.figma;
+          if (window.__figmaMCPInstance) return window.__figmaMCPInstance;
+          for (const frame of document.querySelectorAll("iframe")) {
+            try {
+              if (frame.contentWindow && frame.contentWindow.figma) {
+                return frame.contentWindow.figma;
+              }
+            } catch (_) {
+              /* cross-origin frame — skip */
+            }
+          }
+          return null;
+        };
+        const waitForFigma = (timeoutMs) =>
+          new Promise((resolve) => {
+            const found = findFigma();
+            if (found) return resolve(found);
+            let elapsed = 0;
+            const timer = setInterval(() => {
+              const f = findFigma();
+              if (f || (elapsed += 100) >= timeoutMs) {
+                clearInterval(timer);
+                resolve(f || null);
+              }
+            }, 100);
+          });
+
         try {
           const next = new URL(href);
-          const cur = new URL(location.href);
-          // Same file, same spot already — nothing to do.
-          if (cur.pathname === next.pathname && cur.search === next.search) {
-            return;
+          const nodeParam = next.searchParams.get("node-id");
+          const figma = await waitForFigma(8000);
+          if (!figma) return { moved: false, reason: "no-figma-api" };
+
+          // Link has no specific node: the file is already loaded; just keep
+          // the focused tab as-is (no reload needed).
+          if (!nodeParam) return { moved: true, reason: "no-node" };
+
+          const id = nodeParam.replace(/-/g, ":");
+          let node = null;
+          try {
+            node = figma.getNodeByIdAsync
+              ? await figma.getNodeByIdAsync(id)
+              : figma.getNodeById(id);
+          } catch (_) {}
+          // In dynamic-page documents nodes on other pages aren't loaded yet.
+          if (!node && figma.loadAllPagesAsync) {
+            try {
+              await figma.loadAllPagesAsync();
+              node = await figma.getNodeByIdAsync(id);
+            } catch (_) {}
           }
-          const path = next.pathname + next.search + next.hash;
-          history.pushState(history.state, "", path);
-          // Replay a back/forward-style event so the router re-reads the URL.
-          window.dispatchEvent(
-            new PopStateEvent("popstate", { state: history.state })
-          );
+          if (!node) return { moved: false, reason: "node-not-found" };
+
+          // Switch to the node's page if it lives on a different one.
+          let page = node;
+          while (page && page.type !== "PAGE") page = page.parent;
+          if (page && figma.currentPage !== page) {
+            if (figma.setCurrentPageAsync) await figma.setCurrentPageAsync(page);
+            else figma.currentPage = page;
+          }
+
+          // Select and zoom to the node, like the desktop app does.
+          if (node.type !== "PAGE") {
+            try {
+              figma.currentPage.selection = [node];
+            } catch (_) {}
+            figma.viewport.scrollAndZoomIntoView([node]);
+          }
+
+          // Reflect the new location in the address bar (pushState ≠ reload).
+          try {
+            history.pushState(history.state, "", next.pathname + next.search);
+          } catch (_) {}
+          return { moved: true, reason: "jumped" };
         } catch (e) {
-          /* leave the tab untouched rather than risk a reload */
+          return { moved: false, reason: "error" };
         }
       }
     });
+    const r = results && results[0] && results[0].result;
+    moved = !!(r && r.moved);
   } catch (e) {
-    // Scripting was rejected (tab discarded, not yet a figma app page, …).
+    moved = false;
+  }
+
+  if (!moved) {
+    // Plugin API not reachable (view-only file, editor still booting, …).
     // Fall back to a normal navigation so the link still lands somewhere.
-    await chrome.tabs.update(tabId, { url });
+    try {
+      await chrome.tabs.update(tabId, { url });
+    } catch (e) {
+      /* tab gone */
+    }
   }
 }
 
