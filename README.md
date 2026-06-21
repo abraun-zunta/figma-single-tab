@@ -8,8 +8,10 @@ Tab **reuses that tab** instead of piling up duplicates:
 
 1. It detects the incoming Figma link.
 2. It finds the tab where the same file is already open.
-3. It moves that tab to the exact location in the link (the right page, frame,
-   node, or prototype screen) and brings it to the front.
+3. It brings that tab to the front and tells Figma to jump to the exact
+   location in the link (the right page, frame, node, or prototype screen) —
+   **without reloading the file**, exactly like clicking a comment or share
+   link from inside Figma.
 4. It closes the duplicate tab that just opened.
 
 The result: no more hunting through ten near-identical "Untitled" Figma tabs.
@@ -65,8 +67,14 @@ When a Figma link loads, the worker:
 
 - extracts its file key,
 - looks for another open tab with the same file key,
-- and, if one exists, redirects that tab to the new URL, focuses it, and closes
-  the duplicate.
+- and, if one exists, focuses that tab and asks Figma's own client-side router
+  to navigate to the linked location, then closes the duplicate.
+
+The in-place jump is done through the History API (`pushState` + `popstate`) —
+the same mechanism Figma uses for the browser's back/forward buttons — so the
+already-loaded file simply moves to the right page/node **instead of doing a
+full reload**. If the existing tab isn't ready for an in-app jump, it falls back
+to a normal navigation so the link always lands somewhere.
 
 If no other tab has the file open, the link is left alone — it simply becomes the
 canonical tab for that file. Internal navigation within a single open file is
@@ -77,10 +85,12 @@ never touched.
 | Permission | Why it's needed |
 | --- | --- |
 | `tabs` | Read tab URLs to detect Figma files, switch to the existing tab, and close the duplicate. |
+| `scripting` | Inject a tiny History-API call into the existing Figma tab so it jumps to the linked location without reloading. |
 | `storage` | Remember whether the feature is enabled. |
 | `host_permissions: *://*.figma.com/*` | Limit all of the above strictly to Figma pages. |
 
-The extension never reads page contents and never touches non-Figma tabs.
+The injected snippet only calls `history.pushState` + dispatches a `popstate`
+event. The extension never reads page contents and never touches non-Figma tabs.
 
 ## Settings
 

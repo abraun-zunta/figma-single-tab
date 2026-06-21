@@ -3,7 +3,7 @@
   "name": "Figma Single Tab",
   "version": "1.0.0",
   "description": "Opens every Figma link in the tab where that file is already open — just like the Figma desktop app. No more duplicate tabs.",
-  "permissions": ["tabs", "storage"],
+  "permissions": ["tabs", "storage", "scripting"],
   "host_permissions": [
     "*://*.figma.com/*"
   ],

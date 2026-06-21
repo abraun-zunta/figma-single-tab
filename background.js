@@ -85,21 +85,25 @@ async function consolidate(tabId, url) {
   closing.add(tabId);
 
   try {
-    // Move the existing tab to the requested location and bring it forward.
-    programmaticNav.add(target.id);
-    await chrome.tabs.update(target.id, { url, active: true });
+    // Bring the existing tab and its window forward. This does NOT reload it.
+    await chrome.tabs.update(target.id, { active: true });
     if (typeof target.windowId === "number") {
       await chrome.windows.update(target.windowId, { focused: true });
     }
+
+    // The existing tab already has this file loaded. Instead of reloading it,
+    // ask Figma's own SPA router to navigate to the linked location — exactly
+    // like clicking a comment/share link from inside the file. Our pushState
+    // will fire onUpdated for this tab, so guard against re-entry.
+    programmaticNav.add(target.id);
+    await navigateInPlace(target.id, url);
+    setTimeout(() => programmaticNav.delete(target.id), 5000);
   } catch (e) {
-    // Existing tab vanished mid-flight — fall back to keeping the new one.
+    // Existing tab vanished mid-flight — keep the freshly opened tab instead.
     programmaticNav.delete(target.id);
     closing.delete(tabId);
     return;
   }
-
-  // Safety net: clear the self-nav guard even if no further event arrives.
-  setTimeout(() => programmaticNav.delete(target.id), 5000);
 
   try {
     await chrome.tabs.remove(tabId);
@@ -107,6 +111,43 @@ async function consolidate(tabId, url) {
     // Tab already gone; nothing to do.
   } finally {
     closing.delete(tabId);
+  }
+}
+
+// Navigate an already-loaded Figma tab to a new location without a full page
+// reload, by driving Figma's client-side router through the History API.
+// Figma re-reads the page/node from the URL on `popstate` (the same path used
+// by the browser back/forward buttons), so a pushState + popstate reproduces
+// an in-app jump. Falls back to a normal navigation if injection isn't allowed
+// (e.g. the tab is still on a non-app page).
+async function navigateInPlace(tabId, url) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      args: [url],
+      func: (href) => {
+        try {
+          const next = new URL(href);
+          const cur = new URL(location.href);
+          // Same file, same spot already — nothing to do.
+          if (cur.pathname === next.pathname && cur.search === next.search) {
+            return;
+          }
+          const path = next.pathname + next.search + next.hash;
+          history.pushState({}, "", path);
+          window.dispatchEvent(
+            new PopStateEvent("popstate", { state: history.state })
+          );
+        } catch (e) {
+          // As a last resort, navigate normally (will reload).
+          location.href = href;
+        }
+      }
+    });
+  } catch (e) {
+    // Scripting was rejected (tab discarded, not yet a figma app page, …).
+    // Fall back to a normal navigation so the link still lands somewhere.
+    await chrome.tabs.update(tabId, { url });
   }
 }
 
