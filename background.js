@@ -115,15 +115,27 @@ async function consolidate(tabId, url) {
 }
 
 // Navigate an already-loaded Figma tab to a new location without a full page
-// reload, by driving Figma's client-side router through the History API.
-// Figma re-reads the page/node from the URL on `popstate` (the same path used
-// by the browser back/forward buttons), so a pushState + popstate reproduces
-// an in-app jump. Falls back to a normal navigation if injection isn't allowed
-// (e.g. the tab is still on a non-app page).
+// reload, by driving Figma's own client-side router.
+//
+// Two things are essential:
+//   1. world: "MAIN" — the snippet must run in the page's own JS context, not
+//      the extension's isolated world. Figma's router patches/listens on the
+//      page's History API; a pushState from the isolated world hits the
+//      *native* History and is invisible to it (this is exactly why an
+//      isolated-world attempt silently did nothing).
+//   2. pushState + a manually dispatched popstate — pushState alone never
+//      notifies an SPA router, but routers (React Router style, which Figma
+//      uses) re-read window.location on `popstate`, the same event the
+//      back/forward buttons fire. So we replay it.
+//
+// pushState can't trigger a reload, so this is safe; if Figma ignored it the
+// URL would still be correct and nothing destroyed. Falls back to a real
+// navigation only when injection itself is rejected (discarded tab, etc.).
 async function navigateInPlace(tabId, url) {
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
+      world: "MAIN",
       args: [url],
       func: (href) => {
         try {
@@ -134,13 +146,13 @@ async function navigateInPlace(tabId, url) {
             return;
           }
           const path = next.pathname + next.search + next.hash;
-          history.pushState({}, "", path);
+          history.pushState(history.state, "", path);
+          // Replay a back/forward-style event so the router re-reads the URL.
           window.dispatchEvent(
             new PopStateEvent("popstate", { state: history.state })
           );
         } catch (e) {
-          // As a last resort, navigate normally (will reload).
-          location.href = href;
+          /* leave the tab untouched rather than risk a reload */
         }
       }
     });
