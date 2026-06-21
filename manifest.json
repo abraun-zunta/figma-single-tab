@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Figma Single Tab",
+  "version": "1.0.0",
+  "description": "Opens every Figma link in the tab where that file is already open — just like the Figma desktop app. No more duplicate tabs.",
+  "permissions": ["tabs", "storage"],
+  "host_permissions": [
+    "*://*.figma.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_page": "options.html",
+  "action": {
+    "default_title": "Figma Single Tab",
+    "default_popup": "options.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
