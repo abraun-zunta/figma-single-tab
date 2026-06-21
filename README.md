@@ -90,8 +90,9 @@ No reload, no lost work — the canvas just glides to the node.
 
 > **Note:** the Plugin API jump needs **edit access** to the file (Figma only
 > exposes `window.figma` to editors). On view-only files, or if the editor
-> hasn't finished booting, the extension automatically **falls back to a normal
-> navigation** so the link still lands at the right place.
+> hasn't finished booting, the extension **never reloads your open tab** — it
+> simply logs a warning and lets the newly opened tab load normally, exactly as
+> it would without the extension. The jump is attempted instantly (no waiting).
 
 If no other tab has the file open, the link is left alone — it simply becomes the
 canonical tab for that file. Internal navigation within a single open file is

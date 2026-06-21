@@ -81,28 +81,37 @@ async function consolidate(tabId, url) {
 
   const target = candidates[0];
 
-  // Mark the duplicate as closing up front so repeated events are ignored.
-  closing.add(tabId);
-
+  // Try to jump the existing tab to the linked node in place (no reload).
+  // We do this BEFORE touching anything else and only commit to reusing the
+  // tab if it actually worked. Guard against the pushState re-entering here.
+  programmaticNav.add(target.id);
+  let jumped = false;
   try {
-    // Bring the existing tab and its window forward. This does NOT reload it.
+    jumped = await navigateInPlace(target.id, url);
+  } catch (e) {
+    jumped = false;
+  }
+  setTimeout(() => programmaticNav.delete(target.id), 3000);
+
+  if (!jumped) {
+    // Figma's in-page API wasn't reachable (view-only file, editor still
+    // booting, etc.). Do NOT reload anything — just leave the freshly opened
+    // tab to load normally, exactly as it would without the extension.
+    console.warn(
+      "[Figma Single Tab] In-place jump unavailable; leaving the new tab open."
+    );
+    return;
+  }
+
+  // Jump succeeded: bring the existing tab forward and close the duplicate.
+  closing.add(tabId);
+  try {
     await chrome.tabs.update(target.id, { active: true });
     if (typeof target.windowId === "number") {
       await chrome.windows.update(target.windowId, { focused: true });
     }
-
-    // The existing tab already has this file loaded. Instead of reloading it,
-    // drive Figma's in-page Plugin API to jump to the linked node — exactly
-    // like the desktop app moving its viewport. navigateInPlace may pushState,
-    // which fires onUpdated for this tab, so guard against re-entry.
-    programmaticNav.add(target.id);
-    await navigateInPlace(target.id, url);
-    setTimeout(() => programmaticNav.delete(target.id), 5000);
   } catch (e) {
-    // Existing tab vanished mid-flight — keep the freshly opened tab instead.
-    programmaticNav.delete(target.id);
-    closing.delete(tabId);
-    return;
+    /* existing tab vanished — still try to close the duplicate below */
   }
 
   try {
@@ -116,29 +125,27 @@ async function consolidate(tabId, url) {
 
 // Jump an already-loaded Figma tab to the linked node WITHOUT a full reload by
 // driving Figma's in-page Plugin API — the same `window.figma` that plugins
-// (and tools like figma-mcp-browser) use. This is what lets us match the
-// desktop app: move the viewport instead of re-loading the document.
+// (and tools like figma-mcp-browser) use. Returns true if the jump happened,
+// false otherwise. It NEVER reloads anything: if `window.figma` isn't there
+// (view-only file, editor not ready) it just logs and returns false, and the
+// caller leaves the new tab alone.
 //
 // What makes this work:
 //   - world: "MAIN" — `window.figma` lives in the page's own JS context, not
 //     the extension's isolated world, so the snippet must run in MAIN.
-//   - It initialises asynchronously after the editor boots, and may live on
-//     the top window, on a manually-registered instance, or inside the
-//     same-origin editor iframe — so we poll and scan frames for it.
+//   - It may live on the top window, on a manually-registered instance, or
+//     inside the same-origin editor iframe — so we check all three. We grab it
+//     immediately (with only a couple of instant retries — never a long wait).
 //   - node-id in the URL is hyphenated (1-23); the Plugin API wants colons
 //     (1:23).
-//
-// Returns/handles a {moved} result; if the API isn't reachable (view-only
-// file, editor not ready, etc.) we fall back to a normal navigation so the
-// link still lands at the right place.
 async function navigateInPlace(tabId, url) {
-  let moved = false;
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId },
       world: "MAIN",
       args: [url],
       func: async (href) => {
+        const TAG = "[Figma Single Tab]";
         const findFigma = () => {
           if (window.figma) return window.figma;
           if (window.__figmaMCPInstance) return window.__figmaMCPInstance;
@@ -153,28 +160,24 @@ async function navigateInPlace(tabId, url) {
           }
           return null;
         };
-        const waitForFigma = (timeoutMs) =>
-          new Promise((resolve) => {
-            const found = findFigma();
-            if (found) return resolve(found);
-            let elapsed = 0;
-            const timer = setInterval(() => {
-              const f = findFigma();
-              if (f || (elapsed += 100) >= timeoutMs) {
-                clearInterval(timer);
-                resolve(f || null);
-              }
-            }, 100);
-          });
 
         try {
           const next = new URL(href);
           const nodeParam = next.searchParams.get("node-id");
-          const figma = await waitForFigma(8000);
-          if (!figma) return { moved: false, reason: "no-figma-api" };
 
-          // Link has no specific node: the file is already loaded; just keep
-          // the focused tab as-is (no reload needed).
+          // Grab the API right away. A couple of micro-retries cover the case
+          // where it's a tick behind, but we never block for seconds.
+          let figma = findFigma();
+          for (let i = 0; i < 3 && !figma; i++) {
+            await new Promise((r) => setTimeout(r, 50));
+            figma = findFigma();
+          }
+          if (!figma) {
+            console.warn(TAG, "window.figma not available — skipping jump.");
+            return { moved: false, reason: "no-figma-api" };
+          }
+
+          // Link with no specific node: file is already loaded, nothing to move.
           if (!nodeParam) return { moved: true, reason: "no-node" };
 
           const id = nodeParam.replace(/-/g, ":");
@@ -184,14 +187,10 @@ async function navigateInPlace(tabId, url) {
               ? await figma.getNodeByIdAsync(id)
               : figma.getNodeById(id);
           } catch (_) {}
-          // In dynamic-page documents nodes on other pages aren't loaded yet.
-          if (!node && figma.loadAllPagesAsync) {
-            try {
-              await figma.loadAllPagesAsync();
-              node = await figma.getNodeByIdAsync(id);
-            } catch (_) {}
+          if (!node) {
+            console.warn(TAG, "node not found:", id);
+            return { moved: false, reason: "node-not-found" };
           }
-          if (!node) return { moved: false, reason: "node-not-found" };
 
           // Switch to the node's page if it lives on a different one.
           let page = node;
@@ -215,24 +214,17 @@ async function navigateInPlace(tabId, url) {
           } catch (_) {}
           return { moved: true, reason: "jumped" };
         } catch (e) {
+          console.warn(TAG, "in-place jump failed:", e && e.message);
           return { moved: false, reason: "error" };
         }
       }
     });
     const r = results && results[0] && results[0].result;
-    moved = !!(r && r.moved);
+    return !!(r && r.moved);
   } catch (e) {
-    moved = false;
-  }
-
-  if (!moved) {
-    // Plugin API not reachable (view-only file, editor still booting, …).
-    // Fall back to a normal navigation so the link still lands somewhere.
-    try {
-      await chrome.tabs.update(tabId, { url });
-    } catch (e) {
-      /* tab gone */
-    }
+    // Injection itself was rejected (discarded tab, etc.). Don't reload.
+    console.warn("[Figma Single Tab] could not inject jump script:", e && e.message);
+    return false;
   }
 }
 
