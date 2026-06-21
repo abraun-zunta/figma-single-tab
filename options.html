@@ -110,8 +110,22 @@
         <span class="slider"></span>
       </span>
     </div>
+    <div class="row" style="margin-top: 14px;">
+      <label for="reloadWhenUnarmed">Reload to reach the node if needed</label>
+      <span class="switch">
+        <input type="checkbox" id="reloadWhenUnarmed" />
+        <span class="slider"></span>
+      </span>
+    </div>
     <div class="hint">
-      Turn this off to temporarily let Figma links open in new tabs again.
+      The instant, no-reload jump uses Figma's plugin API, which only turns on
+      after you run any plugin once in a tab. Until then, leave this off to never
+      reload (the link just opens in a new tab), or turn it on to reload the
+      existing tab so the link still lands in one tab.
+    </div>
+    <div class="hint" style="margin-top: 8px;">
+      Tip: run any Figma plugin once in a file to enable instant no-reload jumps
+      for that tab.
     </div>
     <script src="options.js"></script>
   </body>

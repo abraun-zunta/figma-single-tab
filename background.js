@@ -15,7 +15,12 @@ const FILE_PATH_PATTERN =
   /\/(file|design|board|proto|slides|deck|whiteboard)\/([A-Za-z0-9]+)/;
 
 const DEFAULT_SETTINGS = {
-  enabled: true
+  enabled: true,
+  // When the in-place (no-reload) jump isn't possible — Figma only exposes
+  // window.figma after a plugin has run once in that tab — should we reload the
+  // existing tab to reach the node? Off by default: never reload; just let the
+  // new tab open normally.
+  reloadWhenUnarmed: false
 };
 
 // Tab ids we are navigating ourselves. Our own tabs.update() triggers an
@@ -61,7 +66,7 @@ async function consolidate(tabId, url) {
   const fileKey = getFileKey(url);
   if (!fileKey) return;
 
-  const { enabled } = await getSettings();
+  const { enabled, reloadWhenUnarmed } = await getSettings();
   if (!enabled) return;
 
   const figmaTabs = await chrome.tabs.query({ url: "*://*.figma.com/*" });
@@ -94,16 +99,30 @@ async function consolidate(tabId, url) {
   setTimeout(() => programmaticNav.delete(target.id), 3000);
 
   if (!jumped) {
-    // Figma's in-page API wasn't reachable (view-only file, editor still
-    // booting, etc.). Do NOT reload anything — just leave the freshly opened
-    // tab to load normally, exactly as it would without the extension.
-    console.warn(
-      "[Figma Single Tab] In-place jump unavailable; leaving the new tab open."
-    );
-    return;
+    // Figma's in-page API wasn't reachable (view-only file, or window.figma not
+    // yet armed — Figma only exposes it after a plugin runs once in the tab).
+    if (!reloadWhenUnarmed) {
+      // Default: don't reload anything. Leave the freshly opened tab to load
+      // normally, exactly as it would without the extension.
+      console.warn(
+        "[Figma Single Tab] In-place jump unavailable; leaving the new tab open."
+      );
+      return;
+    }
+    // Opt-in: reload the existing tab to the node so the link still lands in a
+    // single tab (at the cost of a reload). Reuse the existing-tab path below.
+    programmaticNav.add(target.id);
+    setTimeout(() => programmaticNav.delete(target.id), 3000);
+    try {
+      await chrome.tabs.update(target.id, { url });
+    } catch (e) {
+      console.warn("[Figma Single Tab] reload fallback failed:", e && e.message);
+      return;
+    }
   }
 
-  // Jump succeeded: bring the existing tab forward and close the duplicate.
+  // Jump (or reload fallback) succeeded: bring the existing tab forward and
+  // close the duplicate.
   closing.add(tabId);
   try {
     await chrome.tabs.update(target.id, { active: true });
@@ -141,7 +160,11 @@ async function consolidate(tabId, url) {
 async function navigateInPlace(tabId, url) {
   try {
     const results = await chrome.scripting.executeScript({
-      target: { tabId },
+      // Inject into every frame: Figma's editor sometimes runs inside an
+      // iframe (occasionally cross-origin), so window.figma may only exist
+      // there, not in the top frame. Each frame self-checks; the one that has
+      // the API does the jump, the rest no-op.
+      target: { tabId, allFrames: true },
       world: "MAIN",
       args: [url],
       func: async (href) => {
@@ -219,8 +242,11 @@ async function navigateInPlace(tabId, url) {
         }
       }
     });
-    const r = results && results[0] && results[0].result;
-    return !!(r && r.moved);
+    // Any frame that reports a successful jump counts as success.
+    return (
+      Array.isArray(results) &&
+      results.some((r) => r && r.result && r.result.moved)
+    );
   } catch (e) {
     // Injection itself was rejected (discarded tab, etc.). Don't reload.
     console.warn("[Figma Single Tab] could not inject jump script:", e && e.message);

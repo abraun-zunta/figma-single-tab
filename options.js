@@ -1,10 +1,17 @@
-const DEFAULTS = { enabled: true };
-const checkbox = document.getElementById("enabled");
+const DEFAULTS = { enabled: true, reloadWhenUnarmed: false };
 
-chrome.storage.sync.get(DEFAULTS, ({ enabled }) => {
-  checkbox.checked = enabled;
+const inputs = {
+  enabled: document.getElementById("enabled"),
+  reloadWhenUnarmed: document.getElementById("reloadWhenUnarmed")
+};
+
+chrome.storage.sync.get(DEFAULTS, (settings) => {
+  inputs.enabled.checked = settings.enabled;
+  inputs.reloadWhenUnarmed.checked = settings.reloadWhenUnarmed;
 });
 
-checkbox.addEventListener("change", () => {
-  chrome.storage.sync.set({ enabled: checkbox.checked });
-});
+for (const [key, input] of Object.entries(inputs)) {
+  input.addEventListener("change", () => {
+    chrome.storage.sync.set({ [key]: input.checked });
+  });
+}

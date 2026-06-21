@@ -88,11 +88,33 @@ which is also reachable from the page's `MAIN` JavaScript world. It:
 
 No reload, no lost work — the canvas just glides to the node.
 
-> **Note:** the Plugin API jump needs **edit access** to the file (Figma only
-> exposes `window.figma` to editors). On view-only files, or if the editor
-> hasn't finished booting, the extension **never reloads your open tab** — it
-> simply logs a warning and lets the newly opened tab load normally, exactly as
-> it would without the extension. The jump is attempted instantly (no waiting).
+### Arming the no-reload jump (one-time per tab)
+
+Figma doesn't load its plugin runtime on page load — it creates `window.figma`
+**the first time any plugin runs in that tab**. Until then `window.figma` is
+`undefined` and the no-reload jump can't run. This is a Figma behavior, not a
+bug in the extension (the same quirk is why tools like figma-friend tell you to
+"open any plugin once").
+
+So, to enable instant no-reload jumps:
+
+> **Run any Figma plugin once in the file** (right-click → Plugins → run
+> anything). After that, `window.figma` stays available for the whole tab
+> session, and every link to that file jumps instantly with no reload. Since the
+> extension never reloads the tab, it stays "armed" across unlimited jumps.
+
+**Until a tab is armed** (or on view-only files, where the API isn't exposed),
+the extension does **not** reload your open tab. By default it just lets the new
+link open in its own tab, exactly as it would without the extension. If you'd
+rather always land in a single tab, enable **"Reload to reach the node if
+needed"** in the popup — it will reload the existing tab to the node when the
+instant jump isn't available.
+
+> **Why not auto-arm it?** There's no public, reliable way to launch a plugin
+> programmatically, so the one-time manual step can't be automated. (The Figma
+> desktop app's no-reload feel comes from its privileged desktop build, which
+> isn't exposed to the web app, to Electron wrappers like figma-linux — which
+> reload via `loadURL` — or to browser extensions.)
 
 If no other tab has the file open, the link is left alone — it simply becomes the
 canonical tab for that file. Internal navigation within a single open file is
